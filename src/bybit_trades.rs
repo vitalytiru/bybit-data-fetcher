@@ -1,6 +1,6 @@
 use crate::Decimal128;
 use anyhow::Result;
-use clickhouse::{Client, Row};
+use clickhouse::{Client, Row, inserter::Inserter};
 use serde::{Deserialize, Serialize};
 use std::{str::FromStr, time::Duration};
 use time::OffsetDateTime;
@@ -28,7 +28,7 @@ pub struct BybitTradeData {
     seq: u64,
 }
 
-#[derive(Clone, PartialEq, Row, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Row, Serialize, Deserialize, Debug)]
 pub struct BybitTrades {
     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
     pub server_timestamp: OffsetDateTime,
@@ -53,25 +53,18 @@ impl BybitTrades {
         server_timestamp: &OffsetDateTime,
         received_timestamp: &OffsetDateTime,
         trade_data: Vec<BybitTradeData>,
-        client: Client,
+        trades_inserter: &mut Inserter<BybitTrades>,
     ) -> Result<()> {
         let parsed_trades =
             Self::parse_bybit_trade(trade_data, server_timestamp, received_timestamp);
-        let mut trades_inserter = client
-            .inserter::<BybitTrades>("trades_raw_ml")
-            .with_max_rows(100)
-            .with_period(Some(Duration::from_secs(5)))
-            .with_period_bias(0.2);
         for trade in parsed_trades {
-            trades_inserter.write(&trade).await?
+            trades_inserter.write(&trade).await.expect("err")
         }
-        let stats = trades_inserter.commit().await?;
-        if stats.rows > 0 {
-            println!(
-                "{} bytes, {} rows, {} transactions have been inserted in tradebook",
-                stats.bytes, stats.rows, stats.transactions,
-            );
-        }
+        let stats = trades_inserter.commit().await.expect("err");
+        println!(
+            "{} bytes, {} rows, {} transactions have been inserted in tradebook",
+            stats.bytes, stats.rows, stats.transactions,
+        );
 
         Ok(())
     }

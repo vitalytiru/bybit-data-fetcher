@@ -64,6 +64,16 @@ pub async fn fetch_bybit(
     println!("Sub completed");
 
     println!("here");
+    let mut orderbook_inserter = client
+        .inserter::<BybitOrderbook>("orderbook_raw_ml")
+        .with_max_rows(100)
+        .with_period(Some(Duration::from_secs(5)))
+        .with_period_bias(0.2);
+    let mut trades_inserter = client
+        .inserter::<BybitTrades>("trades_raw_ml")
+        .with_max_rows(100)
+        .with_period(Some(Duration::from_secs(1)))
+        .with_period_bias(0.2);
 
     while let Some(msg) = ws.next().await {
         match msg? {
@@ -81,7 +91,7 @@ pub async fn fetch_bybit(
                                     &received_timestamp,
                                     &topic.client_timestamp,
                                     orderbook,
-                                    client.clone(),
+                                    &mut orderbook_inserter,
                                 )
                                 .await?;
                             }
@@ -90,7 +100,7 @@ pub async fn fetch_bybit(
                                     &server_timestamp,
                                     &received_timestamp,
                                     trades,
-                                    client.clone(),
+                                    &mut trades_inserter,
                                 )
                                 .await?;
                             }
