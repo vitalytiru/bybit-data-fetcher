@@ -21,15 +21,15 @@ pub struct BybitTradeData {
     tick_direction: String,
     #[serde(rename = "i")]
     trade_id: String,
-    #[serde(rename = "RPI")]
-    is_rpi: bool,
     #[serde(rename = "BT")]
     is_block_trade: bool,
+    #[serde(rename = "RPI")]
+    is_rpi: bool,
     seq: u64,
 }
 
 #[derive(Clone, PartialEq, Row, Serialize, Deserialize)]
-pub struct Trades {
+pub struct BybitTrades {
     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
     pub server_timestamp: OffsetDateTime,
     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
@@ -38,7 +38,7 @@ pub struct Trades {
     pub trade_timestamp: OffsetDateTime,
     pub symbol: String,
     pub trade_id: String,
-    pub side: u8,
+    pub side: String,
     pub price: Decimal128,
     pub volume: Decimal128,
     pub tick_direction: String,
@@ -48,7 +48,7 @@ pub struct Trades {
     pub exchange: String,
 }
 
-impl Trades {
+impl BybitTrades {
     // pub async fn fetch_trades_bybit(
     //     mut ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     //     client: Client,
@@ -117,7 +117,7 @@ impl Trades {
             .expect("trade timestamp out of range"),
             symbol: td.symbol.clone(),
             trade_id: td.trade_id.clone(),
-            side: if td.side == "Buy" { 1 } else { 2 },
+            side: if td.side == "Buy" { "Buy" } else { "Sell" }.to_string(),
             price: Decimal128::from_str(&td.price)?,
             volume: Decimal128::from_str(&td.volume)?,
             tick_direction: td.tick_direction.clone(),

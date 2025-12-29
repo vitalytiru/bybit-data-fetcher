@@ -1,7 +1,10 @@
 mod api;
+mod bybit_orderbook;
 mod bybit_trades;
-use bybit_trades::{Trades, BybitTradeData};
+mod load_db;
 use anyhow::{Context, Result};
+use bybit_orderbook::{BybitOrderbook, BybitOrderbookData};
+use bybit_trades::{BybitTradeData, BybitTrades};
 use clickhouse::{self, Client, Row};
 use fixnum::{FixedPoint, typenum::U18};
 use futures_util::{SinkExt, StreamExt};
@@ -24,9 +27,28 @@ use tokio_tungstenite::{
 pub type Decimal128 = FixedPoint<i128, U18>;
 
 #[derive(Deserialize, Debug)]
+#[serde(untagged)]
+enum Bybit {
+    Confirmation { success: bool },
+    Topics(BybitTopics),
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(untagged)]
 enum BybitData {
     Trades(Vec<BybitTradeData>),
     Orderbook(BybitOrderbookData),
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BybitTopics {
+    topic: String,
+    #[serde(rename = "ts")]
+    server_timestamp: u64,
+    r#type: String,
+    data: BybitData,
+    #[serde(rename = "cts")]
+    client_timestamp: Option<u64>,
 }
 
 pub async fn fetch_bybit(
@@ -34,165 +56,127 @@ pub async fn fetch_bybit(
     client: Client,
     args: Vec<String>,
 ) -> Result<()> {
-    let mut first_message_skipped = false;
-    // 3. send subscription message
     let sub = serde_json::json!({
         "op": "subscribe",
         "args": args
     });
     ws.send(Message::Text(sub.to_string().into())).await?;
+    println!("Sub completed");
+    let mut trades_inserter = client
+        .inserter::<BybitTrades>("trades_raw_ml")
+        .with_max_rows(100)
+        .with_period(Some(Duration::from_secs(5)))
+        .with_period_bias(0.2);
+
+    let mut orderbook_inserter = client
+        .inserter::<BybitOrderbook>("orderbook_raw_ml")
+        .with_max_rows(100)
+        .with_period(Some(Duration::from_secs(5)))
+        .with_period_bias(0.2);
+    println!("here");
+
     while let Some(msg) = ws.next().await {
-        if !first_message_skipped {
-            first_message_skipped = true;
-            continue;
-        }
         match msg? {
             Message::Text(message) => {
+                // println!("{message:?}");
                 let parsed_message: Bybit =
                     serde_json::from_str(&message).expect("failed to parse json");
+                if let Bybit::Confirmation(success) = &parsed_message {
+                    println!("{success:?}");
+                    continue;
+                }
+                let parsed_message: BybitTopics =
+                    serde_json::from_str(&message).expect("failed to parse json");
+
                 let server_timestamp = OffsetDateTime::from_unix_timestamp_nanos(
                     (parsed_message.server_timestamp as i128) * 1_000_000,
                 )
                 .expect("server timestamp out of range");
-                let received_timestamp = OffsetDateTime::now_utc();
 
-                match &parsed_message.data {
-                    BybitData::Orderbook(orderbook) => (),
+                let received_timestamp = OffsetDateTime::from_unix_timestamp_nanos(
+                    (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) * 1_000_000,
+                )
+                .expect("timestamp out of range");
+
+                match parsed_message.data {
+                    BybitData::Orderbook(orderbook) => {
+                        let client_timestamp = OffsetDateTime::from_unix_timestamp_nanos(
+                            (parsed_message
+                                .client_timestamp
+                                .expect("unable to parse client timestamp")
+                                as i128)
+                                * 1_000_000,
+                        )?;
+
+                        let parsed_orderbook = BybitOrderbook::parse_bybit_orderbook(
+                            orderbook,
+                            &server_timestamp,
+                            &received_timestamp,
+                            &client_timestamp,
+                        )
+                        .expect("failed to parse orderbook");
+                        for order in parsed_orderbook {
+                            // println!("{order:?}");
+                            orderbook_inserter.write(&order).await?
+                        }
+                        let stats = orderbook_inserter.commit().await?;
+                        // if stats.rows > 0 {
+                        //     println!(
+                        //         "{} bytes, {} rows, {} transactions have been inserted in orderbook",
+                        //         stats.bytes, stats.rows, stats.transactions,
+                        //     );
+                        // }
+                    }
                     BybitData::Trades(trades) => {
-                        let parsed_trades = Trades::parse_bybit_trade(
+                        let parsed_trades = BybitTrades::parse_bybit_trade(
                             trades.to_vec(),
                             &server_timestamp,
                             &received_timestamp,
                         );
+                        for trade in parsed_trades {
+                            trades_inserter.write(&trade).await?
+                        }
+                        let stats = trades_inserter.commit().await?;
+                        // if stats.rows > 0 {
+
+                        // println!(
+                        //     "{} bytes, {} rows, {} transactions have been inserted in tradebook",
+                        //     stats.bytes, stats.rows, stats.transactions,
+                        // );}
                     }
                 }
             }
 
             Message::Ping(d) => ws.send(Message::Pong(d)).await?,
-            _ => (),
+            _ => println!("error"),
         }
     }
-    Ok(())
-}
-
-#[derive(Deserialize, Debug)]
-pub struct Bybit {
-    topic: String,
-    #[serde(rename = "ts")]
-    server_timestamp: u64,
-    r#type: String,
-    data: BybitData,
-}
-
-
-#[derive(Deserialize, Debug)]
-struct BybitOrderbookData {
-    #[serde(rename = "cts")]
-    client_timestamp: String,
-    #[serde(rename = "s")]
-    symbol: String,
-    #[serde(rename = "b")]
-    bid: Vec<Vec<String>>,
-    #[serde(rename = "a")]
-    ask: Vec<Vec<String>>,
-    #[serde(rename = "u")]
-    update: u64,
-    seq: u64,
-}
-
-// #[derive(Clone, PartialEq, Row, Serialize, Deserialize)]
-// pub struct Trades {
-//     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
-//     pub server_timestamp: OffsetDateTime,
-//     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
-//     pub received_timestamp: OffsetDateTime,
-//     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
-//     pub trade_timestamp: OffsetDateTime,
-//     pub symbol: String,
-//     pub trade_id: String,
-//     pub side: u8,
-//     pub price: Decimal128,
-//     pub volume: Decimal128,
-//     pub tick_direction: String,
-//     pub is_block_trade: bool,
-//     pub is_rpi: bool,
-//     pub seq: u64,
-//     pub exchange: String,
-// }
-
-pub async fn load_db() -> Result<Client> {
-    use clickhouse::Client;
-    let password = fs::read_to_string("/home/lastgosu/clickhousepass")
-        .expect("error with pass reading")
-        .trim()
-        .to_string();
-    let client = Client::default()
-        .with_url("http://localhost:8123")
-        .with_user("nixos")
-        .with_password(format!("{}", password));
-    println!("db loaded");
-    client
-        .query(
-            r#"
-        CREATE TABLE IF NOT EXISTS trades_raw_ml
-        (
-            server_timestamp       DateTime64(3, 'UTC'),
-            received_timestamp       DateTime64(3, 'UTC'),
-            trade_timestamp       DateTime64(3, 'UTC'),
-            symbol          LowCardinality(String),
-            trade_id        LowCardinality(String),
-            side            UInt8,
-            price           Decimal128(18),
-            volume             Decimal128(18),
-            tick_direction  LowCardinality(String),
-            is_block_trade  Bool,
-            is_rpi          Bool,
-            seq             UInt64,
-            exchange        LowCardinality(String) DEFAULT 'bybit'
-        )
-        ENGINE = ReplacingMergeTree()
-        PARTITION BY toYYYYMM(trade_timestamp)
-        ORDER BY (symbol, trade_timestamp, trade_id)
-        SETTINGS index_granularity = 8192
-        "#,
-        )
-        .execute()
-        .await?;
-    println!("table created or existed");
-    Ok(client)
-}
-
-pub async fn fetch_bybit_orderbook(
-    mut ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
-) -> Result<()> {
-    let sub = serde_json::json!({
-        "op": "subscribe",
-        "args": ["orderbook.50.BTCUSDT" ]
-    });
-    let mut i = 0;
-    ws.send(Message::Text(sub.to_string().into())).await?;
-    while let Some(msg) = ws.next().await {
-        match msg? {
-            Message::Text(message) => {
-                println!("{message:?}, {i:?}");
-                i += 1
-            }
-            Message::Ping(message) => (),
-            _ => (),
-        }
-    }
+    println!("end");
+    trades_inserter.end().await?;
+    orderbook_inserter.end().await?;
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let client = load_db().await.expect("error while loading database");
+    let client = load_db::load_db()
+        .await
+        .expect("error while loading database");
     CryptoProvider::install_default(rustls::crypto::ring::default_provider())
         .expect("failed to install ring crypto provider");
     let url = "wss://stream.bybit.com/v5/public/linear";
     let (ws, _) = connect_async(url).await?;
     // Trades::fetch_trades_bybit(ws, client).await?;
     println!("connected via websocket to {:?}", url);
-    fetch_bybit_orderbook(ws).await?;
+    fetch_bybit(
+        ws,
+        client,
+        vec![
+            "publicTrade.BTCUSDT".to_string(),
+            "orderbook.50.BTCUSDT".to_string(),
+        ],
+    )
+    .await?;
+
     Ok(())
 }
