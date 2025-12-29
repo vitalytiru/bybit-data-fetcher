@@ -1,8 +1,8 @@
 use crate::Decimal128;
-use anyhow::{Context, Result};
-use clickhouse::Row;
+use anyhow::Result;
+use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 use time::OffsetDateTime;
 
 #[derive(Deserialize, Debug, Clone)]
@@ -49,49 +49,34 @@ pub struct BybitTrades {
 }
 
 impl BybitTrades {
-    // pub async fn fetch_trades_bybit(
-    //     mut ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
-    //     client: Client,
-    // ) -> Result<()> {
-    //     let mut first_message_skipped = false;
-    //     // 3. send subscription message
-    //     let sub = serde_json::json!({
-    //         "op": "subscribe",
-    //         "args": ["publicTrade.BTCUSDT" ]
-    //     });
-    //     ws.send(Message::Text(sub.to_string().into())).await?;
-    //     let mut parsed_trades: Vec<Trades> = vec![];
-    //     // 4. read whatever arrives
-    //     while let Some(msg) = ws.next().await {
-    //         if !first_message_skipped {
-    //             first_message_skipped = true;
-    //             continue;
-    //         }
-    //         match msg? {
-    //             Message::Text(message) => {
-    //                 println!("{:?}", &message);
-    //                 let parsed_message: Bybit = serde_json::from_str(&message)?;
-    //                 println!("{:?}", &parsed_message);
-    //                 println!("{:?}", parsed_trades.len());
-    //                 let trades = Trades::parse_bybit_data(parsed_message);
-    //                 parsed_trades.extend(trades);
-    //                 if parsed_trades.len() >= 100 {
-    //                     let mut inserter = client.insert::<Trades>("trades_raw_ml").await?;
-    //                     for trade in &parsed_trades {
-    //                         inserter.write(trade).await?;
-    //                     }
-    //                     inserter.end().await?;
-    //                     parsed_trades.clear();
-    //                 }
-    //             }
-    //             Message::Ping(d) => ws.send(Message::Pong(d)).await?,
-    //             _ => {}
-    //         }
-    //     }
-    //     Ok(())
-    // }
+    pub async fn parse_bybit_trades(
+        server_timestamp: &OffsetDateTime,
+        received_timestamp: &OffsetDateTime,
+        trade_data: Vec<BybitTradeData>,
+        client: Client,
+    ) -> Result<()> {
+        let parsed_trades =
+            Self::parse_bybit_trade(trade_data, server_timestamp, received_timestamp);
+        let mut trades_inserter = client
+            .inserter::<BybitTrades>("trades_raw_ml")
+            .with_max_rows(100)
+            .with_period(Some(Duration::from_secs(5)))
+            .with_period_bias(0.2);
+        for trade in parsed_trades {
+            trades_inserter.write(&trade).await?
+        }
+        let stats = trades_inserter.commit().await?;
+        if stats.rows > 0 {
+            println!(
+                "{} bytes, {} rows, {} transactions have been inserted in tradebook",
+                stats.bytes, stats.rows, stats.transactions,
+            );
+        }
 
-    pub fn parse_bybit_trade(
+        Ok(())
+    }
+
+    fn parse_bybit_trade(
         data: Vec<BybitTradeData>,
         server_timestamp: &OffsetDateTime,
         received_timestamp: &OffsetDateTime,

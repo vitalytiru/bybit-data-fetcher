@@ -22,11 +22,11 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         rustNightly = fenix.packages.${system}.complete.withComponents [
-          "rust-analyzer"
+          "rust-analyzer-preview"
           "cargo"
-          "clippy"
+          "clippy-preview"
           "rustc"
-          "rustfmt"
+          "rustfmt-preview"
           "rust-std"
           "rust-src"
         ];
