@@ -1,8 +1,8 @@
 use crate::Decimal128;
 use anyhow::Result;
-use clickhouse::{Client, Row, inserter::Inserter};
+use clickhouse::{Row, inserter::Inserter};
 use serde::{Deserialize, Serialize};
-use std::{str::FromStr, time::Duration};
+use std::str::FromStr;
 use time::OffsetDateTime;
 
 #[derive(Deserialize, Debug, Clone)]
@@ -61,10 +61,12 @@ impl BybitTrades {
             trades_inserter.write(&trade).await.expect("err")
         }
         let stats = trades_inserter.commit().await.expect("err");
-        println!(
-            "{} bytes, {} rows, {} transactions have been inserted in tradebook",
-            stats.bytes, stats.rows, stats.transactions,
-        );
+        if stats.rows > 0 {
+            println!(
+                "{} bytes, {} rows, {} transactions have been inserted in tradebook",
+                stats.bytes, stats.rows, stats.transactions,
+            );
+        }
 
         Ok(())
     }
