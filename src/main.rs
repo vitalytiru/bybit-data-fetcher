@@ -11,7 +11,7 @@ use clickhouse::{
     self, Client, Row,
     inserter::{self, Inserter},
 };
-use std::str::FromStr;
+use std::{marker, str::FromStr};
 
 use fixnum::{FixedPoint, typenum::U18};
 use futures_util::{SinkExt, StreamExt};
@@ -87,6 +87,7 @@ pub async fn fetch_bybit(
     while let Some(msg) = ws.next().await {
         match msg? {
             Message::Text(message) => {
+                println!("{message:?}");
                 let parsed_message: Bybit =
                     serde_json::from_str(&message).expect("failed to parse json");
                 match parsed_message {
@@ -148,6 +149,7 @@ pub async fn get_time(parsed_message: &BybitTopics) -> Result<(OffsetDateTime, O
         (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) * 1_000_000,
     )
     .expect("received timestamp out of range");
+
     Ok((server_timestamp, received_timestamp))
 }
 
@@ -167,12 +169,11 @@ async fn main() -> Result<(), anyhow::Error> {
         client,
         vec![
             // "publicTrade.BTCUSDT".to_string(),
-            // "orderbook.50.BTCUSDT".to_string(),
-            "tickers.BTCUSDT".to_string(),
+            "orderbook.50.BTCUSDT".to_string(),
+            // "tickers.BTCUSDT".to_string(),
         ],
     )
     .await?;
 
     Ok(())
 }
-// Utf8Bytes(b"{\"topic\":\"tickers.BTCUSDT\",\"type\":\"snapshot\",\"data\":{\"symbol\":\"BTCUSDT\",\"tickDirection\":\"ZeroMinusTick\",\"price24hPcnt\":\"-0.01951\",\"lastPrice\":\"91650.00\",\"prevPrice24h\":\"93473.70\",\"highPrice24h\":\"94405.00\",\"lowPrice24h\":\"91217.20\",\"prevPrice1h\":\"92684.20\",\"markPrice\":\"91652.79\",\"indexPrice\":\"91698.41\",\"openInterest\":\"52112.489\",\"openInterestValue\":\"4776255010.69\",\"turnover24h\":\"8084090865.5083\",\"volume24h\":\"87043.6070\",\"fundingIntervalHour\":\"8\",\"fundingCap\":\"0.005\",\"nextFundingTime\":\"1767801600000\",\"fundingRate\":\"0.00002751\",\"bid1Price\":\"91650.00\",\"bid1Size\":\"6.277\",\"ask1Price\":\"91650.10\",\"ask1Size\":\"2.660\",\"preOpenPrice\":\"\",\"preQty\":\"\",\"curPreListingPhase\":\"\"},\"cs\":508470514103,\"ts\":1767779450652}")

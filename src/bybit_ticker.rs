@@ -184,7 +184,7 @@ impl BybitTicker {
         };
         ticker_inserter.write(&tick).await?;
         let stats = ticker_inserter.commit().await?;
-        if stats.rows >= 0 {
+        if stats.rows > 0 {
             println!(
                 "{} bytes, {} rows, {} transactions have been inserted in tickers",
                 stats.bytes, stats.rows, stats.transactions,
