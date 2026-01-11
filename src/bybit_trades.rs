@@ -50,8 +50,8 @@ pub struct BybitTrades {
 
 impl BybitTrades {
     pub async fn parse_bybit_trades(
-        server_timestamp: &OffsetDateTime,
-        received_timestamp: &OffsetDateTime,
+        server_timestamp: OffsetDateTime,
+        received_timestamp: OffsetDateTime,
         trade_data: Vec<BybitTradeData>,
         trades_inserter: &mut Inserter<BybitTrades>,
     ) -> Result<()> {
@@ -73,24 +73,24 @@ impl BybitTrades {
 
     fn parse_bybit_trade(
         data: Vec<BybitTradeData>,
-        server_timestamp: &OffsetDateTime,
-        received_timestamp: &OffsetDateTime,
+        server_timestamp: OffsetDateTime,
+        received_timestamp: OffsetDateTime,
     ) -> Vec<Self> {
         data.iter()
             .map(|trade| {
-                Self::parse_bybit_trade_data(trade, &server_timestamp, &received_timestamp).unwrap()
+                Self::parse_bybit_trade_data(trade, server_timestamp, received_timestamp).unwrap()
             })
             .collect()
     }
 
     fn parse_bybit_trade_data(
         td: &BybitTradeData,
-        server_timestamp: &OffsetDateTime,
-        received_timestamp: &OffsetDateTime,
+        server_timestamp: OffsetDateTime,
+        received_timestamp: OffsetDateTime,
     ) -> Result<Self> {
         Ok(Self {
-            server_timestamp: *server_timestamp,
-            received_timestamp: *received_timestamp,
+            server_timestamp: server_timestamp,
+            received_timestamp: received_timestamp,
             trade_timestamp: OffsetDateTime::from_unix_timestamp_nanos(
                 (td.trade_timestamp as i128) * 1_000_000,
             )

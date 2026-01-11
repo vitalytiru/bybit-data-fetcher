@@ -53,7 +53,6 @@ pub async fn load_db() -> Result<Client> {
             price           Decimal128(18),
             volume             Decimal128(18),
             update             UInt64,
-            seq             UInt64,
             exchange        LowCardinality(String) DEFAULT 'bybit'
         )
         ENGINE = MergeTree()

@@ -11,14 +11,17 @@ use clickhouse::{
     self, Client, Row,
     inserter::{self, Inserter},
 };
-use std::{marker, str::FromStr};
-
 use fixnum::{FixedPoint, typenum::U18};
 use futures_util::{SinkExt, StreamExt};
 use rustls::{client, crypto::CryptoProvider, ticketer};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::time::Duration;
+use std::{
+    cell::{OnceCell, RefCell},
+    marker,
+    str::FromStr,
+};
 use time::{OffsetDateTime, UtcDateTime, UtcOffset, format_description::well_known::Rfc3339};
 use tokio::{self, net::TcpStream};
 use tokio_tungstenite::{
@@ -40,7 +43,7 @@ pub struct BybitTopics {
     #[serde(rename = "ts")]
     server_timestamp: u64,
     #[serde(rename = "type")]
-    r#type: String,
+    ttype: String,
     data: BybitData,
     #[serde(rename = "cs")]
     cross_sequence: Option<u64>,
@@ -87,7 +90,6 @@ pub async fn fetch_bybit(
     while let Some(msg) = ws.next().await {
         match msg? {
             Message::Text(message) => {
-                println!("{message:?}");
                 let parsed_message: Bybit =
                     serde_json::from_str(&message).expect("failed to parse json");
                 match parsed_message {
@@ -99,18 +101,19 @@ pub async fn fetch_bybit(
                         match topic.data {
                             BybitData::Orderbook(orderbook) => {
                                 BybitOrderbook::parse_bybit_orderbook(
-                                    &server_timestamp,
-                                    &received_timestamp,
-                                    &topic.client_timestamp,
+                                    server_timestamp,
+                                    received_timestamp,
+                                    topic.client_timestamp,
                                     orderbook,
                                     &mut orderbook_inserter,
+                                    &topic.ttype,
                                 )
                                 .await?;
                             }
                             BybitData::Trades(trades) => {
                                 BybitTrades::parse_bybit_trades(
-                                    &server_timestamp,
-                                    &received_timestamp,
+                                    server_timestamp,
+                                    received_timestamp,
                                     trades,
                                     &mut trades_inserter,
                                 )
@@ -118,11 +121,11 @@ pub async fn fetch_bybit(
                             }
                             BybitData::Ticker(ticker) => {
                                 BybitTicker::parse_bybit_ticker(
-                                    &server_timestamp,
-                                    &received_timestamp,
+                                    server_timestamp,
+                                    received_timestamp,
                                     ticker,
                                     &mut ticker_inserter,
-                                    &topic.cross_sequence.expect("No cross_sequence for tick"),
+                                    topic.cross_sequence.expect("No cross_sequence for tick"),
                                 )
                                 .await?;
                             }

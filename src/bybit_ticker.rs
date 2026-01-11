@@ -110,11 +110,11 @@ pub struct BybitTickerData {
 
 impl BybitTicker {
     pub async fn parse_bybit_ticker(
-        server_timestamp: &OffsetDateTime,
-        received_timestamp: &OffsetDateTime,
+        server_timestamp: OffsetDateTime,
+        received_timestamp: OffsetDateTime,
         ticker_data: BybitTickerData,
         ticker_inserter: &mut Inserter<BybitTicker>,
-        cross_sequence: &u64,
+        cross_sequence: u64,
     ) -> Result<()> {
         let to_dec = |opt: Option<String>| -> Decimal128 {
             opt.and_then(|s| {
@@ -128,9 +128,9 @@ impl BybitTicker {
         };
 
         let tick = Self {
-            server_timestamp: *server_timestamp,
-            received_timestamp: *received_timestamp,
-            cross_sequence: *cross_sequence,
+            server_timestamp: server_timestamp,
+            received_timestamp: received_timestamp,
+            cross_sequence: cross_sequence,
             symbol: ticker_data.symbol,
             tick_direction: ticker_data.tick_direction.unwrap_or_default(),
             price_24h_pcnt: to_dec(ticker_data.price_24h_pcnt),
@@ -149,7 +149,7 @@ impl BybitTicker {
                 .next_funding_time
                 .and_then(|s| s.parse::<i128>().ok())
                 .and_then(|ms| OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000).ok())
-                .unwrap_or(*server_timestamp),
+                .unwrap_or(server_timestamp),
             funding_rate: to_dec(ticker_data.funding_rate),
             bid1_price: to_dec(ticker_data.bid1_price),
             bid1_size: to_dec(ticker_data.bid1_size),
