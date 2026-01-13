@@ -2,8 +2,30 @@ use crate::Decimal128;
 use anyhow::Result;
 use clickhouse::{Client, Row, inserter::Inserter};
 use serde::{Deserialize, Serialize};
-use std::{str::FromStr, time::Duration};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 use time::OffsetDateTime;
+
+#[derive(Deserialize, Debug, PartialEq, Clone)]
+pub struct TickerCache {
+    orderbook: HashMap<String, BybitCachedTicker>,
+}
+
+#[derive(Deserialize, Debug, PartialEq, Clone)]
+pub struct BybitCachedTicker {
+    server_timestamp: OffsetDateTime,
+    ttype: String,
+    data: BybitOrderbookCachedData,
+    client_timestamp: OffsetDateTime,
+    received_timestamp: OffsetDateTime,
+}
+
+#[derive(Deserialize, Debug, PartialEq, Clone)]
+pub struct BybitOrderbookCachedData {
+    symbol: String,
+    bid: HashMap<String, String>,
+    ask: HashMap<String, String>,
+    update: u64,
+}
 
 #[derive(Clone, PartialEq, Row, Serialize, Deserialize, Debug)]
 pub struct BybitTicker {
