@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use ring::{digest, hmac};
+use ring::hmac;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Api {
@@ -21,7 +21,7 @@ impl Api {
             .unwrap()
             .as_millis() as u64
             + 1000;
-        let key = hmac::Key::new(hmac::HMAC_SHA256, &self.secret.as_bytes());
+        let key = hmac::Key::new(hmac::HMAC_SHA256, self.secret.as_bytes());
         let sig = hmac::sign(&key, message.as_bytes());
         (expires, hex::encode(sig))
     }

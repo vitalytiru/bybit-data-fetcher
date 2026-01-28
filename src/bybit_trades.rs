@@ -1,6 +1,6 @@
 use crate::Decimal128;
 use anyhow::Result;
-use clickhouse::{Row, inserter::Inserter};
+use clickhouse::Row;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use time::OffsetDateTime;
@@ -53,22 +53,10 @@ impl BybitTrades {
         server_timestamp: OffsetDateTime,
         received_timestamp: OffsetDateTime,
         trade_data: Vec<BybitTradeData>,
-        trades_inserter: &mut Inserter<BybitTrades>,
-    ) -> Result<()> {
+    ) -> Result<Vec<Self>> {
         let parsed_trades =
             Self::parse_bybit_trade(trade_data, server_timestamp, received_timestamp);
-        for trade in parsed_trades {
-            trades_inserter.write(&trade).await.expect("err")
-        }
-        let stats = trades_inserter.commit().await.expect("err");
-        if stats.rows > 0 {
-            println!(
-                "{} bytes, {} rows, {} transactions have been inserted in tradebook",
-                stats.bytes, stats.rows, stats.transactions,
-            );
-        }
-
-        Ok(())
+        Ok(parsed_trades)
     }
 
     fn parse_bybit_trade(
@@ -89,8 +77,8 @@ impl BybitTrades {
         received_timestamp: OffsetDateTime,
     ) -> Result<Self> {
         Ok(Self {
-            server_timestamp: server_timestamp,
-            received_timestamp: received_timestamp,
+            server_timestamp,
+            received_timestamp,
             trade_timestamp: OffsetDateTime::from_unix_timestamp_nanos(
                 (td.trade_timestamp as i128) * 1_000_000,
             )

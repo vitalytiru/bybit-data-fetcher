@@ -3,34 +3,30 @@ mod bybit_orderbook;
 mod bybit_ticker;
 mod bybit_trades;
 mod load_db;
-use anyhow::{Context, Error, Result};
+use anyhow::{Context, Result};
 use bybit_orderbook::{BybitOrderbook, BybitOrderbookData};
 use bybit_ticker::{BybitTicker, BybitTickerData};
 use bybit_trades::{BybitTradeData, BybitTrades};
-use clickhouse::{
-    self, Client, Row,
-    inserter::{self, Inserter},
-};
+use clickhouse::{self, Client, inserter::Inserter};
 use fixnum::{FixedPoint, typenum::U18};
 use futures_util::{SinkExt, StreamExt};
-use rustls::{client, crypto::CryptoProvider, ticketer};
-use serde::{Deserialize, Serialize};
-use serde_json;
+use rustls::crypto::CryptoProvider;
+use serde::Deserialize;
 use std::time::Duration;
-use std::{
-    cell::{OnceCell, RefCell},
-    marker,
-    str::FromStr,
+use time::OffsetDateTime;
+use tokio::{
+    self,
+    net::TcpStream,
+    sync::mpsc,
+    sync::mpsc::{Receiver, Sender},
 };
-use time::{OffsetDateTime, UtcDateTime, UtcOffset, format_description::well_known::Rfc3339};
-use tokio::{self, net::TcpStream, select, sync::mpsc, time::timeout};
 use tokio_tungstenite::{
     self, MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message,
 };
 
 pub type Decimal128 = FixedPoint<i128, U18>;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(untagged)]
 enum Bybit {
     Confirmation { success: bool },
@@ -59,6 +55,127 @@ enum BybitData {
     Ticker(BybitTickerData),
 }
 
+pub enum BybitOTT {
+    BybitTicker(BybitTicker),
+    BybitOrderbook(Vec<BybitOrderbook>),
+    BybitTrades(Vec<BybitTrades>),
+}
+
+pub async fn async_parse(
+    tx: Sender<String>,
+    mut parser_rx: Receiver<String>,
+    writer_tx: Sender<BybitOTT>,
+) -> Result<()> {
+    while let Some(message) = parser_rx.recv().await {
+        {
+            let parsed_message: Bybit =
+                serde_json::from_str(&message).expect("failed to parse json");
+            match parsed_message {
+                Bybit::Confirmation { success } => {
+                    println!("Connection established. {success:?}")
+                }
+                Bybit::Topics(topic) => {
+                    let (server_timestamp, received_timestamp) = get_time(&topic).await?;
+                    match topic.data {
+                        BybitData::Orderbook(orderbook) => {
+                            let to_write = BybitOrderbook::parse_bybit_orderbook(
+                                server_timestamp,
+                                received_timestamp,
+                                topic.client_timestamp,
+                                orderbook,
+                                &topic.ttype,
+                                tx.clone(),
+                            )
+                            .await
+                            .context("failed to parse orderbook")?;
+                            writer_tx
+                                .send(BybitOTT::BybitOrderbook(to_write))
+                                .await
+                                .context("failed to send orderbook to channel")?;
+                        }
+                        BybitData::Trades(trades) => {
+                            let to_write = BybitTrades::parse_bybit_trades(
+                                server_timestamp,
+                                received_timestamp,
+                                trades,
+                            )
+                            .await
+                            .context("failed to parse trades")?;
+                            writer_tx
+                                .send(BybitOTT::BybitTrades(to_write))
+                                .await
+                                .context("failed to send trades to channel")?;
+                        }
+                        BybitData::Ticker(ticker) => {
+                            let to_write = BybitTicker::parse_bybit_ticker(
+                                server_timestamp,
+                                received_timestamp,
+                                ticker,
+                                topic.cross_sequence.expect("No cross_sequence for tick"),
+                            )
+                            .await
+                            .context("failed to parse ticker")?;
+                            writer_tx
+                                .send(BybitOTT::BybitTicker(to_write))
+                                .await
+                                .context("failed to send ticker to channel")?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn async_write(
+    mut writer_rx: Receiver<BybitOTT>,
+    mut orderbook_inserter: Inserter<BybitOrderbook>,
+    mut trades_inserter: Inserter<BybitTrades>,
+    mut ticker_inserter: Inserter<BybitTicker>,
+) -> Result<()> {
+    while let Some(to_insert) = writer_rx.recv().await {
+        match to_insert {
+            BybitOTT::BybitTicker(ticker) => {
+                ticker_inserter.write(&ticker).await?;
+                let stats = ticker_inserter.commit().await?;
+                if stats.rows > 0 {
+                    println!(
+                        "{} bytes, {} rows, {} transactions have been inserted in tickers",
+                        stats.bytes, stats.rows, stats.transactions,
+                    );
+                }
+            }
+            BybitOTT::BybitOrderbook(orderbook) => {
+                for order in orderbook {
+                    // println!("{order:?}");
+                    orderbook_inserter.write(&order).await?
+                }
+                let stats = orderbook_inserter.commit().await?;
+                if stats.rows > 0 {
+                    println!(
+                        "{} bytes, {} rows, {} transactions have been inserted in orderbook",
+                        stats.bytes, stats.rows, stats.transactions,
+                    );
+                }
+            }
+            BybitOTT::BybitTrades(trades) => {
+                for trade in trades {
+                    trades_inserter.write(&trade).await.expect("err")
+                }
+                let stats = trades_inserter.commit().await.expect("err");
+                if stats.rows > 0 {
+                    println!(
+                        "{} bytes, {} rows, {} transactions have been inserted in tradebook",
+                        stats.bytes, stats.rows, stats.transactions,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn fetch_bybit(
     mut ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     client: Client,
@@ -70,77 +187,51 @@ pub async fn fetch_bybit(
     });
     ws.send(Message::Text(sub.to_string().into())).await?;
     let (tx, mut rx) = mpsc::channel::<String>(100);
+    let (parser_tx, parser_rx) = mpsc::channel::<String>(100000);
+    let (writer_tx, writer_rx) = mpsc::channel::<BybitOTT>(100000);
+
     println!("Sub completed");
     let mut timeout = tokio::time::interval(Duration::from_secs(30));
-    let mut orderbook_inserter = client
+    let orderbook_inserter = client
         .inserter::<BybitOrderbook>("orderbook_raw_ml")
         .with_max_rows(100)
         .with_period(Some(Duration::from_secs(5)))
         .with_period_bias(0.2);
-    let mut trades_inserter = client
+    let trades_inserter = client
         .inserter::<BybitTrades>("trades_raw_ml")
         .with_max_rows(100)
         .with_period(Some(Duration::from_secs(1)))
         .with_period_bias(0.2);
-    let mut ticker_inserter = client
+    let ticker_inserter = client
         .inserter::<BybitTicker>("ticker_raw_ml")
         .with_max_rows(100)
         .with_period(Some(Duration::from_secs(1)))
         .with_period_bias(0.2);
+    tokio::spawn(async move {
+        if let Err(e) = async_parse(tx, parser_rx, writer_tx.clone()).await {
+            eprintln!("parser task exited: {e}");
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = async_write(
+            writer_rx,
+            orderbook_inserter,
+            trades_inserter,
+            ticker_inserter,
+        )
+        .await
+        {
+            eprintln!("writer task exited: {e}");
+        }
+    });
+
     loop {
         tokio::select! {
-            Some(Ok(msg))  = ws.next() =>
-            match msg {
-                Message::Text(message) => {
-                    println!("{message:?}");
-                    let parsed_message: Bybit =
-                        serde_json::from_str(&message).expect("failed to parse json");
-                    match parsed_message {
-                        Bybit::Confirmation { success } => {
-                            println!("Connection established. {success:?}")
-                        }
-                        Bybit::Topics(topic) => {
-                            let (server_timestamp, received_timestamp) = get_time(&topic).await?;
-                            match topic.data {
-                                BybitData::Orderbook(orderbook) => {
-                                    BybitOrderbook::parse_bybit_orderbook(
-                                        server_timestamp,
-                                        received_timestamp,
-                                        topic.client_timestamp,
-                                        orderbook,
-                                        &mut orderbook_inserter,
-                                        &topic.ttype,
-                                        tx.clone(),
-                                    )
-                                    .await?;
-                                }
-                                BybitData::Trades(trades) => {
-                                    BybitTrades::parse_bybit_trades(
-                                        server_timestamp,
-                                        received_timestamp,
-                                        trades,
-                                        &mut trades_inserter,
-                                    )
-                                    .await?;
-                                }
-                                BybitData::Ticker(ticker) => {
-                                    BybitTicker::parse_bybit_ticker(
-                                        server_timestamp,
-                                        received_timestamp,
-                                        ticker,
-                                        &mut ticker_inserter,
-                                        topic.cross_sequence.expect("No cross_sequence for tick"),
-                                    )
-                                    .await?;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Message::Ping(b) => ws.send(Message::Pong(b)).await?,
-                _ => println!("error"),
-            },
+            Some(Ok(msg))  = ws.next() => match msg {
+                Message::Text(message) => parser_tx.send(message.to_string()).await.context("Failed to send to parser channel")?,
+            Message::Ping(b) => ws.send(Message::Pong(b)).await?,
+            other => println!("Received unexpected message type: {:?}", other),
+        },
             Some(msg) = rx.recv() =>
             match msg.as_str() {
                 "Reconnect" => break,
@@ -187,10 +278,15 @@ async fn main() -> Result<(), anyhow::Error> {
         ws,
         client,
         vec![
-            // "publicTrade.BTCUSDT".to_string(),
+            "publicTrade.BTCUSDT".to_string(),
             "orderbook.50.BTCUSDT".to_string(),
+            "tickers.BTCUSDT".to_string(),
+            "publicTrade.ETHUSDT".to_string(),
             "orderbook.50.ETHUSDT".to_string(),
-            // "tickers.BTCUSDT".to_string(),
+            "tickers.ETHUSDT".to_string(),
+            "tickers.ELSAUSDT".to_string(),
+            "publicTrade.ELSAUSDT".to_string(),
+            "orderbook.50.ELSAUSDT".to_string(),
         ],
     )
     .await?;

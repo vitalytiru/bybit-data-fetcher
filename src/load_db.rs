@@ -1,17 +1,15 @@
 use anyhow::Result;
 use clickhouse::Client;
-use tokio;
 pub async fn load_db() -> Result<Client> {
     use clickhouse::Client;
-    let password = tokio::fs::read_to_string("/home/lastgosu/clickhousepass")
-        .await
-        .expect("error with pass reading")
-        .trim()
-        .to_string();
+    let password = "12qhou34";
     let client = Client::default()
         .with_url("http://localhost:8123")
-        .with_user("nixos")
-        .with_password(format!("{}", password));
+        .with_user("default")
+        .with_password(password.to_string())
+        .with_option("async_insert", "1")
+        .with_option("wait_for_async_insert", "0");
+
     println!("db loaded");
     client
         .query(

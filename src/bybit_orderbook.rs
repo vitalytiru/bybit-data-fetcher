@@ -1,13 +1,11 @@
 use crate::Decimal128;
 use anyhow::Result;
-use clickhouse::{Row, inserter::Inserter};
+use clickhouse::Row;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::mpsc;
 use std::{
     str::FromStr,
-    sync::{LazyLock, Mutex, OnceLock},
-    time::Duration,
+    sync::{LazyLock, Mutex},
 };
 use time::{OffsetDateTime, UtcDateTime};
 
@@ -86,10 +84,10 @@ impl BybitOrderbook {
         received_timestamp: OffsetDateTime,
         client_timestamp: Option<u64>,
         orderbook: BybitOrderbookData,
-        orderbook_inserter: &mut Inserter<Self>,
+        // orderbook_inserter: &mut Inserter<Self>,
         ttype: &String,
         tx: tokio::sync::mpsc::Sender<String>,
-    ) -> Result<()> {
+    ) -> Result<Vec<Self>> {
         let client_timestamp = OffsetDateTime::from_unix_timestamp_nanos(
             (client_timestamp.expect("unable to parse client timestamp") as i128) * 1_000_000,
         )?;
@@ -110,58 +108,59 @@ impl BybitOrderbook {
                 .map(|a| (a[0].to_string(), a[1].to_string()))
                 .collect(),
         };
-        println!("{cached_orderbook_data:?}");
         let cached_orderbook = BybitCachedOrderbook {
-            server_timestamp: server_timestamp,
+            server_timestamp,
             ttype: ttype.to_string(),
             data: cached_orderbook_data,
-            client_timestamp: client_timestamp,
-            received_timestamp: received_timestamp,
+            client_timestamp,
+            received_timestamp,
         };
-        println!("{cached_orderbook:?}");
         match ttype.as_str() {
             "snapshot" => {
                 let mut cached_orderbook_mutex = ORDERBOOK_CACHED.lock().unwrap();
-                println!("{cached_orderbook_mutex:?}");
-                println!("snapshot");
                 cached_orderbook_mutex
                     .orderbook
                     .insert(symbol.clone(), cached_orderbook);
-                println!("{cached_orderbook_mutex:?}");
             }
             "delta" => {
-                let mut cached_orderbook_mutex = ORDERBOOK_CACHED.lock().unwrap();
-                let mutex_unwrapped = &mut cached_orderbook_mutex
-                    .orderbook
-                    .get_mut(&symbol)
-                    .unwrap()
-                    .data;
-                if cached_orderbook.data.update != (mutex_unwrapped.update + 1) {
+                let mut needs_reconnect = false;
+                {
+                    let mut cached_orderbook_mutex = ORDERBOOK_CACHED.lock().unwrap();
+                    let mutex_unwrapped = &mut cached_orderbook_mutex
+                        .orderbook
+                        .get_mut(&symbol)
+                        .unwrap()
+                        .data;
+                    if cached_orderbook.data.update == (mutex_unwrapped.update + 1) {
+                        for bid in cached_orderbook.data.bid {
+                            let (price, volume) = bid;
+                            if volume == "0" {
+                                let _ = &mutex_unwrapped.bid.remove(&price).unwrap();
+                            } else {
+                                mutex_unwrapped.bid.insert(price, volume);
+                                mutex_unwrapped.update = cached_orderbook.data.update
+                            }
+                        }
+                        for ask in cached_orderbook.data.ask {
+                            let (price, volume) = ask;
+                            if volume == "0" {
+                                mutex_unwrapped.ask.remove(&price);
+                            } else {
+                                mutex_unwrapped.ask.insert(price, volume);
+                                mutex_unwrapped.update = cached_orderbook.data.update
+                            }
+                        }
+                    } else {
+                        needs_reconnect = false;
+                    }
+                }
+                if needs_reconnect {
                     tx.send("Reconnect".to_string()).await?;
-                }
-                for bid in cached_orderbook.data.bid {
-                    let (price, volume) = bid;
-                    if volume == "0" {
-                        let _ = &mutex_unwrapped.bid.remove(&price).unwrap();
-                    } else {
-                        mutex_unwrapped.bid.insert(price, volume);
-                        mutex_unwrapped.update = cached_orderbook.data.update
-                    }
-                }
-                for ask in cached_orderbook.data.ask {
-                    let (price, volume) = ask;
-                    if volume == "0" {
-                        mutex_unwrapped.ask.remove(&price);
-                    } else {
-                        mutex_unwrapped.ask.insert(price, volume);
-                        mutex_unwrapped.update = cached_orderbook.data.update
-                    }
                 }
             }
 
             _ => {
                 println!("ERROR");
-                ()
             }
         }
 
@@ -172,19 +171,7 @@ impl BybitOrderbook {
             &symbol,
         )
         .expect("failed to parse orderbook");
-        println!("{parsed_orderbook:?} parsed orderbook");
-        for order in parsed_orderbook {
-            // println!("{order:?}");
-            orderbook_inserter.write(&order).await?
-        }
-        let stats = orderbook_inserter.commit().await?;
-        if stats.rows > 0 {
-            println!(
-                "{} bytes, {} rows, {} transactions have been inserted in orderbook",
-                stats.bytes, stats.rows, stats.transactions,
-            );
-        }
-        Ok(())
+        Ok(parsed_orderbook)
     }
 
     fn parse_orderbook(
@@ -196,10 +183,9 @@ impl BybitOrderbook {
         let mut cached_orderbook = ORDERBOOK_CACHED.lock().unwrap();
         let mutex_unwrapped = &mut cached_orderbook.orderbook.get_mut(symbol).unwrap().data;
 
-        let update = mutex_unwrapped.update.clone();
+        let update = mutex_unwrapped.update;
         let bid_len = mutex_unwrapped.bid.len();
         let ask_len = mutex_unwrapped.ask.len();
-        println!("{mutex_unwrapped:?} mutex unwrapped");
         drop(cached_orderbook);
 
         let mut orderbook: Vec<Self> = Vec::with_capacity(bid_len + ask_len);
@@ -210,9 +196,9 @@ impl BybitOrderbook {
                 client_timestamp: *client_timestamp,
                 symbol: symbol.clone(),
                 side: side.to_string(),
-                price: Decimal128::from_str(&price)?,
-                volume: Decimal128::from_str(&volume)?,
-                update: update.clone(),
+                price: Decimal128::from_str(price)?,
+                volume: Decimal128::from_str(volume)?,
+                update,
                 exchange: "Bybit".to_string(),
             })
         };
@@ -221,19 +207,12 @@ impl BybitOrderbook {
 
         for bid in &mutex_unwrapped.bid {
             let (price, volume) = bid;
-            println!("{:?} bid update", mutex_unwrapped.update);
-            // println!("{price:?}");
-            orderbook.push(create_order(&price, &volume, "Bid").expect("bid push error"));
+            orderbook.push(create_order(price, volume, "Bid").expect("bid push error"));
         }
 
-        println!("{orderbook:?}");
         for ask in &mutex_unwrapped.ask {
-            // println!("{:?} ask update", data.update);
-
             let (price, volume) = ask;
-            // println!("{price:?}");
-
-            orderbook.push(create_order(&price, &volume, "Ask").expect("ask push error"));
+            orderbook.push(create_order(price, volume, "Ask").expect("ask push error"));
         }
 
         Ok(orderbook)
