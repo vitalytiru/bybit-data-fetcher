@@ -1,53 +1,40 @@
-use crate::Decimal128;
-use anyhow::Result;
+use crate::parser::Decimal128;
+use anyhow::{Context, Result};
 use clickhouse::Row;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::{
-    str::FromStr,
-    sync::{LazyLock, Mutex},
-};
+use std::sync::Arc;
+use std::{str::FromStr, sync::LazyLock};
 use time::{OffsetDateTime, UtcDateTime};
+use tokio::sync::Mutex;
 
-static ORDERBOOK_CACHED: LazyLock<Mutex<OrderbookCache>> = LazyLock::new(|| {
-    let now_time = UtcDateTime::now().into();
-    Mutex::new(OrderbookCache {
-        orderbook: HashMap::from([(
-            "".to_string(),
-            BybitCachedOrderbook {
-                server_timestamp: now_time,
-                ttype: "".to_string(),
-                data: BybitOrderbookCachedData {
-                    symbol: "".to_string(),
-                    bid: HashMap::new(),
-                    ask: HashMap::new(),
-                    update: 0,
-                },
-                client_timestamp: now_time,
-                received_timestamp: now_time,
-            },
-        )]),
-    })
-});
 #[derive(Deserialize, Debug, PartialEq, Clone)]
 pub struct OrderbookCache {
-    orderbook: HashMap<String, BybitCachedOrderbook>,
+    pub orderbook: HashMap<String, BybitCachedOrderbook>,
+}
+
+impl OrderbookCache {
+    pub fn new() -> Self {
+        Self {
+            orderbook: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, PartialEq, Clone)]
 pub struct BybitCachedOrderbook {
-    server_timestamp: OffsetDateTime,
-    ttype: String,
-    data: BybitOrderbookCachedData,
-    client_timestamp: OffsetDateTime,
-    received_timestamp: OffsetDateTime,
+    pub server_timestamp: OffsetDateTime,
+    pub ttype: String,
+    pub data: BybitOrderbookCachedData,
+    pub client_timestamp: OffsetDateTime,
+    pub received_timestamp: OffsetDateTime,
 }
 #[derive(Deserialize, Debug, PartialEq, Clone)]
 pub struct BybitOrderbookCachedData {
-    symbol: String,
-    bid: HashMap<String, String>,
-    ask: HashMap<String, String>,
-    update: u64,
+    pub symbol: String,
+    pub bid: HashMap<String, String>,
+    pub ask: HashMap<String, String>,
+    pub update: u64,
 }
 
 #[derive(Clone, PartialEq, Row, Serialize, Deserialize, Debug)]
@@ -87,12 +74,13 @@ impl BybitOrderbook {
         // orderbook_inserter: &mut Inserter<Self>,
         ttype: &String,
         tx: tokio::sync::mpsc::Sender<String>,
+        orderbook_cache: Arc<Mutex<OrderbookCache>>,
     ) -> Result<Vec<Self>> {
         let client_timestamp = OffsetDateTime::from_unix_timestamp_nanos(
             (client_timestamp.expect("unable to parse client timestamp") as i128) * 1_000_000,
         )?;
         let symbol = orderbook.symbol;
-        let cached_orderbook_data = BybitOrderbookCachedData {
+        let new_cache_data = BybitOrderbookCachedData {
             symbol: symbol.clone(),
             update: orderbook.update,
 
@@ -108,57 +96,56 @@ impl BybitOrderbook {
                 .map(|a| (a[0].to_string(), a[1].to_string()))
                 .collect(),
         };
-        let cached_orderbook = BybitCachedOrderbook {
+        let new_cache_orderbook = BybitCachedOrderbook {
             server_timestamp,
             ttype: ttype.to_string(),
-            data: cached_orderbook_data,
+            data: new_cache_data,
             client_timestamp,
             received_timestamp,
         };
         match ttype.as_str() {
             "snapshot" => {
-                let mut cached_orderbook_mutex = ORDERBOOK_CACHED.lock().unwrap();
-                cached_orderbook_mutex
+                orderbook_cache
+                    .lock()
+                    .await
                     .orderbook
-                    .insert(symbol.clone(), cached_orderbook);
+                    .insert(symbol.clone(), new_cache_orderbook);
             }
             "delta" => {
                 let mut needs_reconnect = false;
-                {
-                    let mut cached_orderbook_mutex = ORDERBOOK_CACHED.lock().unwrap();
-                    let mutex_unwrapped = &mut cached_orderbook_mutex
-                        .orderbook
-                        .get_mut(&symbol)
-                        .unwrap()
-                        .data;
-                    if cached_orderbook.data.update == (mutex_unwrapped.update + 1) {
-                        for bid in cached_orderbook.data.bid {
-                            let (price, volume) = bid;
-                            if volume == "0" {
-                                let _ = &mutex_unwrapped.bid.remove(&price).unwrap();
-                            } else {
-                                mutex_unwrapped.bid.insert(price, volume);
-                                mutex_unwrapped.update = cached_orderbook.data.update
+                let mut cache = orderbook_cache.lock().await;
+                match cache.orderbook.get_mut(&symbol) {
+                    Some(cache) => {
+                        let cache_data = &mut cache.data;
+                        if new_cache_orderbook.data.update == (cache_data.update + 1) {
+                            for bid in new_cache_orderbook.data.bid {
+                                let (price, volume) = bid;
+                                if volume == "0" {
+                                    let _ = &cache_data.bid.remove(&price).context("Couldnt remove orderbook price. Update id: {new_cache_orderbook.data.update:?}")?;
+                                } else {
+                                    cache_data.bid.insert(price, volume);
+                                    cache_data.update = new_cache_orderbook.data.update
+                                }
                             }
-                        }
-                        for ask in cached_orderbook.data.ask {
-                            let (price, volume) = ask;
-                            if volume == "0" {
-                                mutex_unwrapped.ask.remove(&price);
-                            } else {
-                                mutex_unwrapped.ask.insert(price, volume);
-                                mutex_unwrapped.update = cached_orderbook.data.update
+                            for ask in new_cache_orderbook.data.ask {
+                                let (price, volume) = ask;
+                                if volume == "0" {
+                                    cache_data.ask.remove(&price);
+                                } else {
+                                    cache_data.ask.insert(price, volume);
+                                    cache_data.update = new_cache_orderbook.data.update
+                                }
                             }
+                        } else {
+                            needs_reconnect = true;
                         }
-                    } else {
-                        needs_reconnect = false;
                     }
+                    None => needs_reconnect = true,
                 }
                 if needs_reconnect {
                     tx.send("Reconnect".to_string()).await?;
                 }
             }
-
             _ => {
                 println!("ERROR");
             }
@@ -169,24 +156,30 @@ impl BybitOrderbook {
             &received_timestamp,
             &client_timestamp,
             &symbol,
+            orderbook_cache,
         )
-        .expect("failed to parse orderbook");
+        .await
+        .context("failed to parse orderbook")?;
         Ok(parsed_orderbook)
     }
 
-    fn parse_orderbook(
+    async fn parse_orderbook(
         server_timestamp: &OffsetDateTime,
         received_timestamp: &OffsetDateTime,
         client_timestamp: &OffsetDateTime,
         symbol: &String,
+        orderbook_cache: Arc<Mutex<OrderbookCache>>,
     ) -> Result<Vec<Self>> {
-        let mut cached_orderbook = ORDERBOOK_CACHED.lock().unwrap();
-        let mutex_unwrapped = &mut cached_orderbook.orderbook.get_mut(symbol).unwrap().data;
+        let mut cache = orderbook_cache.lock().await;
+        let cache_data = &mut cache
+            .orderbook
+            .get_mut(&symbol.clone())
+            .context("Couldnt get {&symbol:?} cache")?
+            .data;
 
-        let update = mutex_unwrapped.update;
-        let bid_len = mutex_unwrapped.bid.len();
-        let ask_len = mutex_unwrapped.ask.len();
-        drop(cached_orderbook);
+        let update = cache_data.update;
+        let bid_len = cache_data.bid.len();
+        let ask_len = cache_data.ask.len();
 
         let mut orderbook: Vec<Self> = Vec::with_capacity(bid_len + ask_len);
         let create_order = |price: &str, volume: &str, side: &str| -> Result<Self> {
@@ -202,15 +195,13 @@ impl BybitOrderbook {
                 exchange: "Bybit".to_string(),
             })
         };
-        let mut cached_orderbook = ORDERBOOK_CACHED.lock().unwrap();
-        let mutex_unwrapped = &mut cached_orderbook.orderbook.get_mut(symbol).unwrap().data;
 
-        for bid in &mutex_unwrapped.bid {
+        for bid in &cache_data.bid {
             let (price, volume) = bid;
             orderbook.push(create_order(price, volume, "Bid").expect("bid push error"));
         }
 
-        for ask in &mutex_unwrapped.ask {
+        for ask in &cache_data.ask {
             let (price, volume) = ask;
             orderbook.push(create_order(price, volume, "Ask").expect("ask push error"));
         }

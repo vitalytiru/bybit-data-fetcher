@@ -1,4 +1,4 @@
-use crate::Decimal128;
+use crate::parser::Decimal128;
 use anyhow::Result;
 use clickhouse::Row;
 use serde::{Deserialize, Serialize};

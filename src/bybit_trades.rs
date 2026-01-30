@@ -1,5 +1,5 @@
-use crate::Decimal128;
-use anyhow::Result;
+use crate::parser::Decimal128;
+use anyhow::{Context, Result};
 use clickhouse::Row;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -54,20 +54,16 @@ impl BybitTrades {
         received_timestamp: OffsetDateTime,
         trade_data: Vec<BybitTradeData>,
     ) -> Result<Vec<Self>> {
-        let parsed_trades =
-            Self::parse_bybit_trade(trade_data, server_timestamp, received_timestamp);
-        Ok(parsed_trades)
+        Self::parse_bybit_trade(trade_data, server_timestamp, received_timestamp)
     }
 
     fn parse_bybit_trade(
         data: Vec<BybitTradeData>,
         server_timestamp: OffsetDateTime,
         received_timestamp: OffsetDateTime,
-    ) -> Vec<Self> {
+    ) -> Result<Vec<Self>> {
         data.iter()
-            .map(|trade| {
-                Self::parse_bybit_trade_data(trade, server_timestamp, received_timestamp).unwrap()
-            })
+            .map(|trade| Self::parse_bybit_trade_data(trade, server_timestamp, received_timestamp))
             .collect()
     }
 
@@ -76,18 +72,25 @@ impl BybitTrades {
         server_timestamp: OffsetDateTime,
         received_timestamp: OffsetDateTime,
     ) -> Result<Self> {
+        let trade_timestamp =
+            OffsetDateTime::from_unix_timestamp_nanos((td.trade_timestamp as i128) * 1_000_000)
+                .map_err(|_| {
+                    anyhow::anyhow!("Trade timestamp out of range for trade_id: {}", td.trade_id)
+                })?;
+
         Ok(Self {
             server_timestamp,
             received_timestamp,
-            trade_timestamp: OffsetDateTime::from_unix_timestamp_nanos(
-                (td.trade_timestamp as i128) * 1_000_000,
-            )
-            .expect("trade timestamp out of range"),
+            trade_timestamp,
             symbol: td.symbol.clone(),
             trade_id: td.trade_id.clone(),
             side: if td.side == "Buy" { "Buy" } else { "Sell" }.to_string(),
-            price: Decimal128::from_str(&td.price)?,
-            volume: Decimal128::from_str(&td.volume)?,
+            price: Decimal128::from_str(&td.price).with_context(|| {
+                format!("Invalid price '{}' in trade {}", td.price, td.trade_id)
+            })?,
+            volume: Decimal128::from_str(&td.volume).with_context(|| {
+                format!("Invalid volume '{}' in trade {}", td.volume, td.trade_id)
+            })?,
             tick_direction: td.tick_direction.clone(),
             is_block_trade: td.is_block_trade,
             is_rpi: td.is_rpi,
