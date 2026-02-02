@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use bybit_orderbook::{
     BybitCachedOrderbook, BybitOrderbook, BybitOrderbookCachedData, OrderbookCache,
 };
+use bybit_ticker::TickerCache;
 use clickhouse::{self, Client};
 use futures_util::{SinkExt, StreamExt};
 use parser::async_parse;
@@ -62,11 +63,18 @@ pub async fn fetch_bybit(
         .with_period(Some(Duration::from_secs(1)))
         .with_period_bias(0.2);
     let orderbook_cache = Arc::new(Mutex::new(OrderbookCache::new()));
+    let mut ticker_cache: TickerCache = TickerCache::new();
 
     tokio::spawn(async move {
-        async_parse(tx, parser_rx, writer_tx.clone(), orderbook_cache.clone())
-            .await
-            .context("parser task exited")
+        async_parse(
+            tx,
+            parser_rx,
+            writer_tx.clone(),
+            orderbook_cache.clone(),
+            &mut ticker_cache,
+        )
+        .await
+        .context("parser task exited")
     });
 
     tokio::spawn(async move {
@@ -83,7 +91,9 @@ pub async fn fetch_bybit(
     loop {
         tokio::select! {
             Some(Ok(msg))  = ws.next() => match msg {
-                Message::Text(message) => parser_tx.send(message.to_string()).await.context("Failed to send to parser channel")?,
+                Message::Text(message) => {
+                    println!("{message:?}");
+                    parser_tx.send(message.to_string()).await.context("Failed to send to parser channel")?},
             Message::Ping(b) => ws.send(Message::Pong(b)).await?,
             other => println!("Received unexpected message type: {:?}", other),
         },
@@ -121,15 +131,15 @@ async fn main() -> Result<(), anyhow::Error> {
         ws,
         client,
         vec![
-            "publicTrade.BTCUSDT".to_string(),
-            "orderbook.50.BTCUSDT".to_string(),
+            // "publicTrade.BTCUSDT".to_string(),
+            // "orderbook.50.BTCUSDT".to_string(),
             "tickers.BTCUSDT".to_string(),
-            "publicTrade.ETHUSDT".to_string(),
-            "orderbook.50.ETHUSDT".to_string(),
-            "tickers.ETHUSDT".to_string(),
-            "tickers.ELSAUSDT".to_string(),
-            "publicTrade.ELSAUSDT".to_string(),
-            "orderbook.50.ELSAUSDT".to_string(),
+            // "publicTrade.ETHUSDT".to_string(),
+            // "orderbook.50.ETHUSDT".to_string(),
+            // "tickers.ETHUSDT".to_string(),
+            // "tickers.ELSAUSDT".to_string(),
+            // "publicTrade.ELSAUSDT".to_string(),
+            // "orderbook.50.ELSAUSDT".to_string(),
         ],
     )
     .await?;

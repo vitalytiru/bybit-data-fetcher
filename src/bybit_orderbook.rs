@@ -3,9 +3,9 @@ use anyhow::{Context, Result};
 use clickhouse::Row;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
-use std::{str::FromStr, sync::LazyLock};
-use time::{OffsetDateTime, UtcDateTime};
+use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
 #[derive(Deserialize, Debug, PartialEq, Clone)]
@@ -32,8 +32,8 @@ pub struct BybitCachedOrderbook {
 #[derive(Deserialize, Debug, PartialEq, Clone)]
 pub struct BybitOrderbookCachedData {
     pub symbol: String,
-    pub bid: HashMap<String, String>,
-    pub ask: HashMap<String, String>,
+    pub bid: HashMap<Decimal128, Decimal128>,
+    pub ask: HashMap<Decimal128, Decimal128>,
     pub update: u64,
 }
 
@@ -46,11 +46,11 @@ pub struct BybitOrderbook {
     #[serde(with = "clickhouse::serde::time::datetime64::millis")]
     pub client_timestamp: OffsetDateTime,
     pub symbol: String,
-    pub side: String,
+    pub side: &'static str,
     pub price: Decimal128,
     pub volume: Decimal128,
     pub update: u64,
-    pub exchange: String,
+    pub exchange: &'static str,
 }
 
 #[derive(Deserialize, Debug, PartialEq, Clone)]
@@ -87,14 +87,24 @@ impl BybitOrderbook {
             bid: orderbook
                 .bid
                 .into_iter()
-                .map(|a| (a[0].to_string(), a[1].to_string()))
-                .collect(),
+                .map(|[price, volume]| {
+                    Ok((
+                        Decimal128::from_str(&price)?,
+                        Decimal128::from_str(&volume)?,
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>>>()?,
 
             ask: orderbook
                 .ask
                 .into_iter()
-                .map(|a| (a[0].to_string(), a[1].to_string()))
-                .collect(),
+                .map(|[price, volume]| {
+                    Ok((
+                        Decimal128::from_str(&price)?,
+                        Decimal128::from_str(&volume)?,
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>>>()?,
         };
         let new_cache_orderbook = BybitCachedOrderbook {
             server_timestamp,
@@ -103,24 +113,22 @@ impl BybitOrderbook {
             client_timestamp,
             received_timestamp,
         };
+        let mut cache = orderbook_cache.lock().await;
         match ttype.as_str() {
             "snapshot" => {
-                orderbook_cache
-                    .lock()
-                    .await
-                    .orderbook
-                    .insert(symbol.clone(), new_cache_orderbook);
+                cache.orderbook.insert(symbol.clone(), new_cache_orderbook);
             }
             "delta" => {
                 let mut needs_reconnect = false;
-                let mut cache = orderbook_cache.lock().await;
+
                 match cache.orderbook.get_mut(&symbol) {
                     Some(cache) => {
                         let cache_data = &mut cache.data;
                         if new_cache_orderbook.data.update == (cache_data.update + 1) {
+                            let zero = Decimal128::from_str("0")?;
                             for bid in new_cache_orderbook.data.bid {
                                 let (price, volume) = bid;
-                                if volume == "0" {
+                                if volume == zero {
                                     let _ = &cache_data.bid.remove(&price).context("Couldnt remove orderbook price. Update id: {new_cache_orderbook.data.update:?}")?;
                                 } else {
                                     cache_data.bid.insert(price, volume);
@@ -129,7 +137,7 @@ impl BybitOrderbook {
                             }
                             for ask in new_cache_orderbook.data.ask {
                                 let (price, volume) = ask;
-                                if volume == "0" {
+                                if volume == zero {
                                     cache_data.ask.remove(&price);
                                 } else {
                                     cache_data.ask.insert(price, volume);
@@ -144,19 +152,23 @@ impl BybitOrderbook {
                 }
                 if needs_reconnect {
                     tx.send("Reconnect".to_string()).await?;
+                    return Ok(vec![]);
                 }
             }
             _ => {
                 println!("ERROR");
             }
         }
-
+        let cache = cache
+            .orderbook
+            .get(&symbol)
+            .context("couldnt get cached symbol")?;
         let parsed_orderbook = Self::parse_orderbook(
             &server_timestamp,
             &received_timestamp,
             &client_timestamp,
             &symbol,
-            orderbook_cache,
+            cache,
         )
         .await
         .context("failed to parse orderbook")?;
@@ -168,42 +180,37 @@ impl BybitOrderbook {
         received_timestamp: &OffsetDateTime,
         client_timestamp: &OffsetDateTime,
         symbol: &String,
-        orderbook_cache: Arc<Mutex<OrderbookCache>>,
+        orderbook_cache: &BybitCachedOrderbook,
     ) -> Result<Vec<Self>> {
-        let mut cache = orderbook_cache.lock().await;
-        let cache_data = &mut cache
-            .orderbook
-            .get_mut(&symbol.clone())
-            .context("Couldnt get {&symbol:?} cache")?
-            .data;
-
+        let cache_data = &orderbook_cache.data;
         let update = cache_data.update;
         let bid_len = cache_data.bid.len();
         let ask_len = cache_data.ask.len();
 
         let mut orderbook: Vec<Self> = Vec::with_capacity(bid_len + ask_len);
-        let create_order = |price: &str, volume: &str, side: &str| -> Result<Self> {
-            Ok(Self {
-                server_timestamp: *server_timestamp,
-                received_timestamp: *received_timestamp,
-                client_timestamp: *client_timestamp,
-                symbol: symbol.clone(),
-                side: side.to_string(),
-                price: Decimal128::from_str(price)?,
-                volume: Decimal128::from_str(volume)?,
-                update,
-                exchange: "Bybit".to_string(),
-            })
-        };
+        let create_order =
+            |price: Decimal128, volume: Decimal128, side: &'static str| -> Result<Self> {
+                Ok(Self {
+                    server_timestamp: *server_timestamp,
+                    received_timestamp: *received_timestamp,
+                    client_timestamp: *client_timestamp,
+                    symbol: symbol.clone(),
+                    side: side,
+                    price: price,
+                    volume: volume,
+                    update,
+                    exchange: "Bybit",
+                })
+            };
 
         for bid in &cache_data.bid {
             let (price, volume) = bid;
-            orderbook.push(create_order(price, volume, "Bid").expect("bid push error"));
+            orderbook.push(create_order(*price, *volume, "Bid").expect("bid push error"));
         }
 
         for ask in &cache_data.ask {
             let (price, volume) = ask;
-            orderbook.push(create_order(price, volume, "Ask").expect("ask push error"));
+            orderbook.push(create_order(*price, *volume, "Ask").expect("ask push error"));
         }
 
         Ok(orderbook)
