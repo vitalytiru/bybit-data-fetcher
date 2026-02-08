@@ -95,23 +95,19 @@ pub struct BybitTicker {
 
 impl BybitTicker {
     fn update_dec(field: &mut Decimal128, opt: Option<String>) {
-        if let Some(s) = opt {
-            if !s.is_empty() {
-                if let Ok(val) = Decimal128::from_str(&s) {
+        if let Some(s) = opt
+            && !s.is_empty()
+                && let Ok(val) = Decimal128::from_str(&s) {
                     *field = val;
                 }
-            }
-        }
     }
 
     fn update_opt_dec(field: &mut Option<Decimal128>, opt: Option<String>) {
-        if let Some(s) = opt {
-            if !s.is_empty() {
-                if let Ok(val) = Decimal128::from_str(&s) {
+        if let Some(s) = opt
+            && !s.is_empty()
+                && let Ok(val) = Decimal128::from_str(&s) {
                     *field = Some(val);
                 }
-            }
-        }
     }
 
     pub fn apply_delta(&mut self, delta: BybitTickerData) {
@@ -154,27 +150,23 @@ impl BybitTicker {
             self.funding_interval_hour = Some(v);
         }
 
-        if let Some(s) = delta.next_funding_time {
-            if let Ok(ms) = s.parse::<i128>() {
-                if let Ok(ts) = OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000) {
+        if let Some(s) = delta.next_funding_time
+            && let Ok(ms) = s.parse::<i128>()
+                && let Ok(ts) = OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000) {
                     self.next_funding_time = ts;
                 }
-            }
-        }
 
-        if let Some(s) = delta.delivery_fee_rate {
-            if let Ok(v) = s.parse::<i64>() {
+        if let Some(s) = delta.delivery_fee_rate
+            && let Ok(v) = s.parse::<i64>() {
                 self.delivery_fee_rate = Some(v);
             }
-        }
 
-        if let Some(s) = delta.delivery_time {
-            if let Ok(ts) =
+        if let Some(s) = delta.delivery_time
+            && let Ok(ts) =
                 OffsetDateTime::parse(&s, &time::format_description::well_known::Rfc3339)
             {
                 self.delivery_time = Some(ts);
             }
-        }
     }
 
     pub async fn parse_bybit_ticker(

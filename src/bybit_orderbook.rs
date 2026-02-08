@@ -195,9 +195,9 @@ impl BybitOrderbook {
                     received_timestamp: *received_timestamp,
                     client_timestamp: *client_timestamp,
                     symbol: symbol.clone(),
-                    side: side,
-                    price: price,
-                    volume: volume,
+                    side,
+                    price,
+                    volume,
                     update,
                     exchange: "Bybit",
                 })

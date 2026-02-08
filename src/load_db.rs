@@ -1,8 +1,10 @@
 use anyhow::Result;
 use clickhouse::Client;
+use tracing::info;
+
 pub async fn load_db() -> Result<Client> {
     use clickhouse::Client;
-    let password = "12qhou34";
+    let password = "";
     let client = Client::default()
         .with_url("http://localhost:8123")
         .with_user("default")
@@ -10,7 +12,7 @@ pub async fn load_db() -> Result<Client> {
         .with_option("async_insert", "1")
         .with_option("wait_for_async_insert", "0");
 
-    println!("db loaded");
+    info!("DB loaded.");
     client
         .query(
             r#"
@@ -114,6 +116,6 @@ pub async fn load_db() -> Result<Client> {
         .execute()
         .await?;
 
-    println!("table created or existed");
+    info!("Table created or existed.");
     Ok(client)
 }
