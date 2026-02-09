@@ -4,7 +4,7 @@ use tracing::info;
 
 pub async fn load_db() -> Result<Client> {
     use clickhouse::Client;
-    let password = "";
+    let password = "yourpassword";
     let client = Client::default()
         .with_url("http://localhost:8123")
         .with_user("default")

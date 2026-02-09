@@ -1,4 +1,3 @@
-use std::sync::Arc;
 
 use crate::bybit_orderbook::{BybitOrderbook, BybitOrderbookData, OrderbookCache};
 use crate::bybit_ticker::{BybitTicker, BybitTickerData, TickerCache};
@@ -7,7 +6,6 @@ use anyhow::{Context, Result};
 use fixnum::{FixedPoint, typenum::U18};
 use serde::Deserialize;
 use time::OffsetDateTime;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{error, info, warn};
 
@@ -67,7 +65,7 @@ pub async fn async_parse(
     tx: Sender<String>,
     mut parser_rx: Receiver<String>,
     writer_tx: Sender<BybitOTT>,
-    orderbook_cache: Arc<Mutex<OrderbookCache>>,
+    orderbook_cache: &mut OrderbookCache,
     ticker_cache: &mut TickerCache,
 ) -> Result<()> {
     info!("Starting parser task...");
@@ -89,14 +87,8 @@ pub async fn async_parse(
                 info!("Bybit subscription status: success={}", success);
             }
             Bybit::Topics(topic) => {
-                if let Err(e) = handle_topic(
-                    topic,
-                    &tx,
-                    &writer_tx,
-                    orderbook_cache.clone(),
-                    ticker_cache,
-                )
-                .await
+                if let Err(e) =
+                    handle_topic(topic, &tx, &writer_tx, orderbook_cache, ticker_cache).await
                 {
                     warn!("Failed to process topic: {:?}", e);
                 }
@@ -112,7 +104,7 @@ async fn handle_topic(
     topic: BybitTopics,
     tx: &Sender<String>,
     writer_tx: &Sender<BybitOTT>,
-    orderbook_cache: Arc<Mutex<OrderbookCache>>,
+    orderbook_cache: &mut OrderbookCache,
     ticker_cache: &mut TickerCache,
 ) -> Result<()> {
     let (server_timestamp, received_timestamp) = get_time(&topic)

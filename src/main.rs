@@ -1,4 +1,3 @@
-mod api;
 mod bybit_orderbook;
 mod bybit_ticker;
 mod bybit_trades;
@@ -16,14 +15,11 @@ use clickhouse::{self, Client, inserter::Inserter};
 use futures_util::{SinkExt, StreamExt};
 use parser::async_parse;
 use rustls::crypto::CryptoProvider;
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::{
     self,
     net::TcpStream,
-    sync::{
-        Mutex,
-        mpsc::{Sender, channel},
-    },
+    sync::mpsc::{Sender, channel},
 };
 use tokio_tungstenite::{
     self, MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message,
@@ -94,6 +90,7 @@ async fn main() -> Result<()> {
     CryptoProvider::install_default(rustls::crypto::ring::default_provider())
         .expect("Failed to install ring crypto provider.");
 
+    // symbols to fetch
     let symbols = vec![
         "publicTrade.BTCUSDT".to_string(),
         "orderbook.50.BTCUSDT".to_string(),
@@ -114,11 +111,18 @@ async fn main() -> Result<()> {
     let (parser_tx, parser_rx) = channel::<String>(100_000);
     let (writer_tx, writer_rx) = channel::<BybitOTT>(100_000);
 
-    let orderbook_cache = Arc::new(Mutex::new(OrderbookCache::new()));
+    let mut orderbook_cache = OrderbookCache::new();
     let mut ticker_cache = TickerCache::new();
 
     tokio::spawn(async move {
-        async_parse(tx, parser_rx, writer_tx, orderbook_cache, &mut ticker_cache).await
+        async_parse(
+            tx,
+            parser_rx,
+            writer_tx,
+            &mut orderbook_cache,
+            &mut ticker_cache,
+        )
+        .await
     });
     tokio::spawn(async move {
         writer::async_write(

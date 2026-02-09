@@ -4,9 +4,7 @@ use clickhouse::Row;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
 use time::OffsetDateTime;
-use tokio::sync::Mutex;
 
 #[derive(Deserialize, Debug, PartialEq, Clone)]
 pub struct OrderbookCache {
@@ -74,7 +72,7 @@ impl BybitOrderbook {
         // orderbook_inserter: &mut Inserter<Self>,
         ttype: &String,
         tx: tokio::sync::mpsc::Sender<String>,
-        orderbook_cache: Arc<Mutex<OrderbookCache>>,
+        orderbook_cache: &mut OrderbookCache,
     ) -> Result<Vec<Self>> {
         let client_timestamp = OffsetDateTime::from_unix_timestamp_nanos(
             (client_timestamp.expect("unable to parse client timestamp") as i128) * 1_000_000,
@@ -113,7 +111,7 @@ impl BybitOrderbook {
             client_timestamp,
             received_timestamp,
         };
-        let mut cache = orderbook_cache.lock().await;
+        let cache = orderbook_cache;
         match ttype.as_str() {
             "snapshot" => {
                 cache.orderbook.insert(symbol.clone(), new_cache_orderbook);
