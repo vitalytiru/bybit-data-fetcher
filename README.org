@@ -1,0 +1,13 @@
+#+TITLE: Bybit Data Fetcher
+#+AUTHOR: Vitaly
+#+OPTIONS: toc:2 num:nil
+
+* Description
+This is real-time fetcher for bybit data (any currency). It fetches trades, order book and tickers using WebSockets and public API. Saving to clickhouse DB. All configs are hardcoded for now. (check load_db.rs and main.rs) 
+
+* Deployment via nixos-anywhere
+If you are familiar with NixOS you can easily deploy it via nixos-anywhere.
+
+#+begin_src bash
+nixos-rebuild switch --flake .#my-server --target-host root@ip
+#+end_src
